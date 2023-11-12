@@ -3,15 +3,13 @@
 package main
 
 import (
-	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/pprof"
 	"runtime"
 	"sync/atomic"
 	"time"
-
-	"github.com/syncthing/syncthing/lib/build"
 )
 
 var rc *rateCalculator
@@ -20,7 +18,7 @@ func statusService(addr string) {
 	rc = newRateCalculator(360, 10*time.Second, &bytesProxied)
 
 	handler := http.NewServeMux()
-	handler.HandleFunc("/status", getStatus)
+	handler.HandleFunc("/metrics", getStatus)
 	if pprofEnabled {
 		handler.HandleFunc("/debug/pprof/", pprof.Index)
 	}
@@ -42,49 +40,30 @@ func getStatus(w http.ResponseWriter, _ *http.Request) {
 
 	sessionMut.Lock()
 	// This can potentially be double the number of pending sessions, as each session has two keys, one for each side.
-	status["version"] = build.Version
-	status["buildHost"] = build.Host
-	status["buildUser"] = build.User
-	status["buildDate"] = build.Date
-	status["startTime"] = rc.startTime
-	status["uptimeSeconds"] = time.Since(rc.startTime) / time.Second
-	status["numPendingSessionKeys"] = len(pendingSessions)
-	status["numActiveSessions"] = len(activeSessions)
+	status["uptime"] = fmt.Sprintf("%d", time.Since(rc.startTime) / time.Second)
+	status["pending_session_keys_nr"] = len(pendingSessions)
+	status["active_sessions_nr"] = len(activeSessions)
 	sessionMut.Unlock()
-	status["numConnections"] = numConnections.Load()
-	status["numProxies"] = numProxies.Load()
-	status["bytesProxied"] = bytesProxied.Load()
-	status["goVersion"] = runtime.Version()
-	status["goOS"] = runtime.GOOS
-	status["goArch"] = runtime.GOARCH
-	status["goMaxProcs"] = runtime.GOMAXPROCS(-1)
-	status["goNumRoutine"] = runtime.NumGoroutine()
-	status["kbps10s1m5m15m30m60m"] = []int64{
-		rc.rate(1) * 8 / 1000, // each interval is 10s
-		rc.rate(60/10) * 8 / 1000,
-		rc.rate(5*60/10) * 8 / 1000,
-		rc.rate(15*60/10) * 8 / 1000,
-		rc.rate(30*60/10) * 8 / 1000,
-		rc.rate(60*60/10) * 8 / 1000,
-	}
-	status["options"] = map[string]interface{}{
-		"network-timeout":  networkTimeout / time.Second,
-		"ping-interval":    pingInterval / time.Second,
-		"message-timeout":  messageTimeout / time.Second,
-		"per-session-rate": sessionLimitBps,
-		"global-rate":      globalLimitBps,
-		"pools":            pools,
-		"provided-by":      providedBy,
-	}
+	status["connections_nr"] = numConnections.Load()
+	status["proxies_nr"] = numProxies.Load()
+	status["bytes_proxied"] = bytesProxied.Load()
 
-	bs, err := json.MarshalIndent(status, "", "    ")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	status["kbps{interval=\"10s\"}"] = rc.rate(1) * 8 / 1000
+	status["kbps{interval=\"1m\"}"] = rc.rate(60/10) * 8 / 1000
+	status["kbps{interval=\"5m\"}"] = rc.rate(5*60/10) * 8 / 1000
+	status["kbps{interval=\"15m\"}"] = rc.rate(15*60/10) * 8 / 1000
+	status["kbps{interval=\"30m\"}"] = rc.rate(30*60/10) * 8 / 1000
+	status["kbps{interval=\"60m\"}"] = rc.rate(60*60/10) * 8 / 1000
+	status["routine_nr"] = runtime.NumGoroutine()
+
+	resp := ""
+
+	for k, v := range status {
+            resp += fmt.Sprintf("strelaysrv_%s %v\n", k, v)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(bs)
+	w.Write([]byte(resp))
 }
 
 type rateCalculator struct {
